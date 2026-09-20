@@ -253,3 +253,8 @@ button {
 .floor-slot.has-car { background: var(--car); color: white; border-color: #5eb3d8; font-weight: 700; }
 .floor-slot.has-call { box-shadow: inset 0 0 0 2px var(--call); }
 .congestion-bar { height: 14px; background: var(--call); border-radius: 4px; }
+.seq-result {
+  border: 1px solid #2c4254; border-radius: 6px; padding: .6rem .8rem; margin-bottom: 1rem;
+  display: flex; flex-direction: column; gap: .25rem; background: #0c1822;
+}
+.toolbar .hint { color: var(--shaft-muted); font-size: .8rem; }

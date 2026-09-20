@@ -44,6 +44,22 @@ class DispatchRequest(BaseModel):
     call_id: int
 
 
+class DispatchSequenceRequest(BaseModel):
+    building_id: int | None = None
+
+
+class SequenceDispatchItem(BaseModel):
+    call_id: int
+    car_id: int
+    score: str
+
+
+class SequenceDispatchOut(BaseModel):
+    assigned: list[SequenceDispatchItem]
+    stopped_call_id: int | None
+    stop_reason: str
+
+
 class LogOut(BaseModel):
     id: int
     call_id: int

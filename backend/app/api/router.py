@@ -11,9 +11,18 @@ from app.schemas.schemas import (
     CarOut,
     CongestionFloor,
     DispatchRequest,
+    DispatchSequenceRequest,
     LogOut,
+    SequenceDispatchItem,
+    SequenceDispatchOut,
 )
-from app.services.dispatch_engine import CallRequest, CarState, congestion_by_floor, pick_car
+from app.services.dispatch_engine import (
+    CallRequest,
+    CarState,
+    congestion_by_floor,
+    dispatch_sequence,
+    pick_car,
+)
 
 api_router = APIRouter()
 
@@ -98,6 +107,76 @@ def dispatch(body: DispatchRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(ticket)
     return ticket
+
+
+@api_router.post("/dispatch/sequence", response_model=SequenceDispatchOut)
+def dispatch_sequence_bulk(
+    body: DispatchSequenceRequest, db: Session = Depends(get_db)
+):
+    """按当前 waiting 顺序（id 升序，即登记先后）连续派工。
+
+    前缀成功的呼梯立即落库为 assigned 并累加轿厢载荷；遇到第一笔全部轿厢
+    接不下的呼梯即停，该笔及其后的呼梯保持 waiting（不做整批回滚）。
+    回放日志只记录成功的笔。
+    """
+    waiting_q = select(CallTicket).where(CallTicket.status == "waiting")
+    if body.building_id is not None:
+        waiting_q = waiting_q.where(CallTicket.building_id == body.building_id)
+    else:
+        # 未指定楼栋时，只处理队首呼梯所属楼栋，避免跨楼栋混派
+        first = db.scalars(waiting_q.order_by(CallTicket.id).limit(1)).first()
+        if first is None:
+            return SequenceDispatchOut(
+                assigned=[], stopped_call_id=None,
+                stop_reason="waiting 队列为空，无可派呼梯",
+            )
+        waiting_q = waiting_q.where(CallTicket.building_id == first.building_id)
+    waiting = list(db.scalars(waiting_q.order_by(CallTicket.id)).all())
+
+    if not waiting:
+        return SequenceDispatchOut(
+            assigned=[], stopped_call_id=None,
+            stop_reason="waiting 队列为空，无可派呼梯",
+        )
+
+    building_id = waiting[0].building_id
+    car_rows = db.scalars(
+        select(ElevatorCar).where(ElevatorCar.building_id == building_id)
+    ).all()
+    cars = [CarState(c.id, c.floor, c.direction, c.load, c.capacity) for c in car_rows]
+    calls = [CallRequest(t.id, t.floor, t.direction, t.passengers) for t in waiting]
+
+    result = dispatch_sequence(cars, calls)
+
+    tickets_by_id = {t.id: t for t in waiting}
+    cars_by_id = {c.id: c for c in car_rows}
+    items: list[SequenceDispatchItem] = []
+    for a in result.assignments:
+        ticket = tickets_by_id[a.call_id]
+        car = cars_by_id[a.car_id]
+        ticket.status = "assigned"
+        ticket.assigned_car_id = car.id
+        ticket.score = f"{a.score:.1f}"
+        car.load += ticket.passengers
+        car.floor = ticket.floor
+        car.direction = ticket.direction
+        db.add(
+            DispatchLog(
+                call_id=ticket.id,
+                car_id=car.id,
+                detail=f"连续派工派予 {car.label}，评分 {a.score:.1f}（同向/距离综合）",
+            )
+        )
+        items.append(
+            SequenceDispatchItem(call_id=ticket.id, car_id=car.id, score=ticket.score)
+        )
+
+    db.commit()
+    return SequenceDispatchOut(
+        assigned=items,
+        stopped_call_id=result.stopped_call_id,
+        stop_reason=result.stop_reason,
+    )
 
 
 @api_router.get("/replay", response_model=list[LogOut])
